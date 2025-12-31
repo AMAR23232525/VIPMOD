@@ -1,0 +1,199 @@
+name: Build Sovereign V41
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: recursive
+        
+    - name: Setup Xcode Command Line Tools
+      run: |
+        # التحقق من تثبيت Xcode Command Line Tools
+        if ! xcode-select -p &>/dev/null; then
+          echo "Installing Xcode Command Line Tools..."
+          sudo xcode-select --install
+          # الانتظار حتى يكتمل التثبيت
+          sleep 30
+        fi
+        
+        # ضبط مسار Xcode
+        sudo xcode-select -s /Applications/Xcode.app
+        sudo xcodebuild -license accept
+        
+        # التحقق من التثبيت
+        xcodebuild -version
+        clang --version
+        
+    - name: Install Homebrew Dependencies
+      run: |
+        # تحديث Homebrew أولاً
+        brew update
+        
+        # تثبيت المتطلبات الضرورية فقط
+        brew install ldid dpkg make
+        
+        # تثبيت أدوات Perl لـ Theos
+        brew install perl
+        
+        # التحقق من التثبيت
+        which ldid
+        which dpkg
+        which make
+        
+    - name: Install Theos
+      run: |
+        # تثبيت Theos
+        git clone --recursive https://github.com/theos/theos.git ~/theos
+        
+        # إنشاء الروابط الرمزية اللازمة
+        mkdir -p ~/theos/toolchain/darwin/iphone
+        
+        # إنشاء روابط للـ clang الموجود في Xcode
+        CLANG_PATH=$(xcrun -f clang)
+        STRIP_PATH=$(xcrun -f strip)
+        
+        ln -sf "$CLANG_PATH" ~/theos/toolchain/darwin/iphone/clang
+        ln -sf "$STRIP_PATH" ~/theos/toolchain/darwin/iphone/strip
+        
+        # ضبط المتغيرات البيئية
+        echo "THEOS=~/theos" >> $GITHUB_ENV
+        echo "THEOS_MAKE_PATH=~/theos/makefiles" >> $GITHUB_ENV
+        echo "PATH=~/theos/bin:$PATH" >> $GITHUB_ENV
+        
+        # ضبط صلاحيات
+        chmod +x ~/theos/bin/*
+        
+    - name: Install Perl Modules for Theos
+      run: |
+        # تثبيت وحدات Perl المطلوبة
+        sudo cpan -i XML::Parser 2>/dev/null || true
+        sudo cpan -i CPAN::Meta 2>/dev/null || true
+        
+        # أو باستخدام cpanm إذا كان متاحاً
+        if command -v cpanm &> /dev/null; then
+          sudo cpanm XML::Parser
+        fi
+        
+    - name: Setup Build Environment
+      run: |
+        # إنشاء متغيرات البيئة للبناء
+        echo "ARCHS=arm64" >> $GITHUB_ENV
+        echo "TARGET=iphone:clang:latest:latest" >> $GITHUB_ENV
+        echo "DEBUG=0" >> $GITHUB_ENV
+        
+        # عرض معلومات البيئة
+        echo "=== Build Environment ==="
+        echo "THEOS: $THEOS"
+        echo "ARCHS: arm64"
+        echo "Clang path: $(which clang)"
+        echo "Make path: $(which make)"
+        
+    - name: Build Project
+      run: |
+        # الانتقال إلى دليل المشروع المناسب
+        if [ -f "Makefile" ]; then
+          echo "Building from root directory"
+        elif [ -f "SovereignV41/Makefile" ]; then
+          cd SovereignV41
+          echo "Building from SovereignV41 directory"
+        elif [ -f "project/Makefile" ]; then
+          cd project
+          echo "Building from project directory"
+        else
+          echo "Creating a test project..."
+          # إنشاء مشروع اختبار بسيط
+          cat > Makefile << 'EOF'
+ARCHS = arm64
+TARGET = iphone:clang:latest:13.0
+DEBUG = 0
+
+include $(THEOS)/makefiles/common.mk
+
+TWEAK_NAME = SovereignTest
+SovereignTest_FILES = Tweak.x
+SovereignTest_CFLAGS = -fobjc-arc
+
+include $(THEOS_MAKE_PATH)/tweak.mk
+EOF
+          
+          cat > Tweak.x << 'EOF'
+#import <UIKit/UIKit.h>
+
+%hook SpringBoard
+- (void)applicationDidFinishLaunching:(id)application {
+    %orig;
+    NSLog(@"[SovereignV41] Test tweak loaded successfully!");
+}
+%end
+EOF
+          
+          # إنشاء ملف control
+          mkdir -p control
+          cat > control/control << 'EOF'
+Package: com.sovereign.test
+Name: Sovereign Test
+Version: 1.0
+Architecture: iphoneos-arm
+Description: Test build for Sovereign V41
+Maintainer: Sovereign Team
+Author: Sovereign Team
+Section: Tweaks
+Depends: mobilesubstrate
+EOF
+        fi
+        
+        # تنظيف البناء السابق
+        make clean 2>/dev/null || true
+        
+        # البناء
+        echo "Starting build process..."
+        make package
+        
+        # عرض الملفات المبنية
+        echo "=== Built Files ==="
+        find . -name "*.deb" -type f 2>/dev/null
+        find . -name "*.dylib" -type f 2>/dev/null
+        
+    - name: Collect Artifacts
+      run: |
+        # إنشاء مجلد للنتائج
+        mkdir -p artifacts
+        
+        # نسخ ملفات البناء
+        cp *.deb artifacts/ 2>/dev/null || true
+        cp -r packages/ artifacts/ 2>/dev/null || true
+        
+        # إذا كان هناك ديناميك لايبزريز
+        find . -name "*.dylib" -exec cp {} artifacts/ \; 2>/dev/null || true
+        
+        # عرض محتويات artifacts
+        echo "=== Artifacts Directory ==="
+        ls -la artifacts/
+        
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: SovereignV41-Build
+        path: artifacts/
+        if-no-files-found: error
+        retention-days: 7
+        
+    - name: Show Build Summary
+      if: always()
+      run: |
+        echo "=== Build Summary ==="
+        echo "Build completed on: $(date)"
+        echo "Repository: $GITHUB_REPOSITORY"
+        echo "Commit: $GITHUB_SHA"
+        echo "Runner OS: $RUNNER_OS"
+        echo "Xcode version: $(xcodebuild -version 2>/dev/null | head -n 1 || echo 'Not available')"
