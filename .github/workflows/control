@@ -1,0 +1,11 @@
+Package: com.sovereign.v41
+Name: Sovereign V41
+Version: 4.1.0
+Architecture: iphoneos-arm
+Description: Advanced iOS protection bypass system
+Maintainer: Sovereign Team
+Author: Sovereign Team
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 13.0)
+Conflicts: com.anticheat.*
+Icon: file:///Library/Sovereign/icon.png
